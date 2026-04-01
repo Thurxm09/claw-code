@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use plugins::{PluginError, PluginManager, PluginSummary};
 use runtime::{
-    compact_session, discover_skill_roots, CompactionConfig, Session, SkillDiscoveryRoot,
-    SkillDiscoverySource, SkillRootKind,
+    compact_session, discover_skill_roots, CompactionConfig, ConfigLoader, ConfigSource,
+    RuntimeConfig, Session, SkillDiscoveryRoot, SkillDiscoverySource, SkillRootKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +143,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         aliases: &[],
         summary: "Inspect Claw config files or merged sections",
         argument_hint: Some("[env|hooks|model|plugins]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Workspace,
+    },
+    SlashCommandSpec {
+        name: "hooks",
+        aliases: &[],
+        summary: "Inspect configured tool hooks",
+        argument_hint: None,
         resume_supported: true,
         category: SlashCommandCategory::Workspace,
     },
@@ -352,6 +360,9 @@ pub enum SlashCommand {
     Config {
         section: Option<String>,
     },
+    Hooks {
+        args: Option<String>,
+    },
     Memory,
     Init,
     Diff,
@@ -434,6 +445,9 @@ impl SlashCommand {
             },
             "config" => Self::Config {
                 section: parts.next().map(ToOwned::to_owned),
+            },
+            "hooks" => Self::Hooks {
+                args: remainder_after_command(trimmed, command),
             },
             "memory" => Self::Memory,
             "init" => Self::Init,
@@ -801,6 +815,23 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
         Some("-h" | "--help" | "help") => Ok(render_skills_usage(None)),
         Some(args) => Ok(render_skills_usage(Some(args))),
     }
+}
+
+pub fn handle_hooks_slash_command(
+    args: Option<&str>,
+    cwd: &Path,
+) -> Result<String, runtime::ConfigError> {
+    let args = normalize_optional_args(args);
+    if matches!(args, Some("-h" | "--help" | "help")) {
+        return Ok(render_hooks_usage(None));
+    }
+    if let Some(unexpected) = args {
+        return Ok(render_hooks_usage(Some(unexpected)));
+    }
+
+    let loader = ConfigLoader::default_for(cwd);
+    let runtime_config = loader.load()?;
+    Ok(render_hooks_report(cwd, &runtime_config))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1648,6 +1679,77 @@ fn render_skills_usage(unexpected: Option<&str>) -> String {
     lines.join("\n")
 }
 
+fn render_hooks_usage(unexpected: Option<&str>) -> String {
+    let mut lines = vec![
+        "Hooks".to_string(),
+        "  Usage            /hooks".to_string(),
+        "  Direct CLI       claw hooks".to_string(),
+        "  Runtime support  PreToolUse, PostToolUse".to_string(),
+    ];
+    if let Some(args) = unexpected {
+        lines.push(format!("  Unexpected       {args}"));
+    }
+    lines.join("\n")
+}
+
+fn render_hooks_report(cwd: &Path, runtime_config: &RuntimeConfig) -> String {
+    let pre_tool_use = runtime_config.hooks().pre_tool_use();
+    let post_tool_use = runtime_config.hooks().post_tool_use();
+    let configured_events =
+        usize::from(!pre_tool_use.is_empty()) + usize::from(!post_tool_use.is_empty());
+    let total_hooks = pre_tool_use.len() + post_tool_use.len();
+
+    let mut lines = vec![
+        "Hooks".to_string(),
+        format!("  Working directory {}", cwd.display()),
+        format!(
+            "  Loaded files      {}",
+            runtime_config.loaded_entries().len()
+        ),
+        format!("  Configured hooks  {total_hooks}"),
+        format!("  Events            {configured_events}"),
+        "  Runtime support   PreToolUse, PostToolUse shell commands".to_string(),
+        String::new(),
+        "Loaded config files".to_string(),
+    ];
+
+    if runtime_config.loaded_entries().is_empty() {
+        lines.push("  (none)".to_string());
+    } else {
+        for entry in runtime_config.loaded_entries() {
+            let source = match entry.source {
+                ConfigSource::User => "user",
+                ConfigSource::Project => "project",
+                ConfigSource::Local => "local",
+            };
+            lines.push(format!("  {source:<7} {}", entry.path.display()));
+        }
+    }
+
+    if total_hooks == 0 {
+        lines.push(String::new());
+        lines.push("No hooks configured.".to_string());
+        return lines.join("\n");
+    }
+
+    render_hook_event_section(&mut lines, "PreToolUse", pre_tool_use);
+    render_hook_event_section(&mut lines, "PostToolUse", post_tool_use);
+    lines.join("\n")
+}
+
+fn render_hook_event_section(lines: &mut Vec<String>, event_name: &str, commands: &[String]) {
+    if commands.is_empty() {
+        return;
+    }
+
+    lines.push(String::new());
+    lines.push(event_name.to_string());
+    lines.push(format!("  Count            {}", commands.len()));
+    for (index, command) in commands.iter().enumerate() {
+        lines.push(format!("  {}. {}", index + 1, command));
+    }
+}
+
 #[must_use]
 pub fn handle_slash_command(
     input: &str,
@@ -1691,6 +1793,7 @@ pub fn handle_slash_command(
         | SlashCommand::Cost
         | SlashCommand::Resume { .. }
         | SlashCommand::Config { .. }
+        | SlashCommand::Hooks { .. }
         | SlashCommand::Memory
         | SlashCommand::Init
         | SlashCommand::Diff
@@ -1708,9 +1811,9 @@ pub fn handle_slash_command(
 mod tests {
     use super::{
         handle_branch_slash_command, handle_commit_push_pr_slash_command,
-        handle_commit_slash_command, handle_plugins_slash_command, handle_slash_command,
-        handle_worktree_slash_command, load_agents_from_roots, load_skills_from_roots,
-        render_agents_report, render_plugins_report, render_skills_report,
+        handle_commit_slash_command, handle_hooks_slash_command, handle_plugins_slash_command,
+        handle_slash_command, handle_worktree_slash_command, load_agents_from_roots,
+        load_skills_from_roots, render_agents_report, render_plugins_report, render_skills_report,
         render_slash_command_help, resume_supported_slash_commands, slash_command_specs,
         suggest_slash_commands, CommitPushPrRequest, DefinitionSource, SlashCommand,
     };
@@ -1977,6 +2080,16 @@ mod tests {
                 section: Some("env".to_string())
             })
         );
+        assert_eq!(
+            SlashCommand::parse("/hooks"),
+            Some(SlashCommand::Hooks { args: None })
+        );
+        assert_eq!(
+            SlashCommand::parse("/hooks help"),
+            Some(SlashCommand::Hooks {
+                args: Some("help".to_string())
+            })
+        );
         assert_eq!(SlashCommand::parse("/memory"), Some(SlashCommand::Memory));
         assert_eq!(SlashCommand::parse("/init"), Some(SlashCommand::Init));
         assert_eq!(SlashCommand::parse("/diff"), Some(SlashCommand::Diff));
@@ -2052,6 +2165,7 @@ mod tests {
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <session-path>"));
         assert!(help.contains("/config [env|hooks|model|plugins]"));
+        assert!(help.contains("/hooks"));
         assert!(help.contains("/memory"));
         assert!(help.contains("/init"));
         assert!(help.contains("/diff"));
@@ -2064,8 +2178,8 @@ mod tests {
         assert!(help.contains("aliases: /plugins, /marketplace"));
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
-        assert_eq!(slash_command_specs().len(), 28);
-        assert_eq!(resume_supported_slash_commands().len(), 13);
+        assert_eq!(slash_command_specs().len(), 29);
+        assert_eq!(resume_supported_slash_commands().len(), 14);
     }
 
     #[test]
@@ -2172,6 +2286,7 @@ mod tests {
         assert!(
             handle_slash_command("/config env", &session, CompactionConfig::default()).is_none()
         );
+        assert!(handle_slash_command("/hooks", &session, CompactionConfig::default()).is_none());
         assert!(handle_slash_command("/diff", &session, CompactionConfig::default()).is_none());
         assert!(handle_slash_command("/version", &session, CompactionConfig::default()).is_none());
         assert!(
@@ -2329,7 +2444,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_and_skills_usage_support_help_and_unexpected_args() {
+    fn agents_skills_and_hooks_usage_support_help_and_unexpected_args() {
         let cwd = temp_dir("slash-usage");
 
         let agents_help =
@@ -2350,7 +2465,49 @@ mod tests {
             super::handle_skills_slash_command(Some("show help"), &cwd).expect("skills usage");
         assert!(skills_unexpected.contains("Unexpected       show help"));
 
+        let hooks_help = handle_hooks_slash_command(Some("help"), &cwd).expect("hooks help");
+        assert!(hooks_help.contains("Usage            /hooks"));
+        assert!(hooks_help.contains("Direct CLI       claw hooks"));
+
+        let hooks_unexpected = handle_hooks_slash_command(Some("show"), &cwd).expect("hooks usage");
+        assert!(hooks_unexpected.contains("Unexpected       show"));
+
         let _ = fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn hooks_report_lists_configured_commands() {
+        let _guard = env_lock();
+        let workspace = temp_dir("hooks-report-workspace");
+        let home = temp_dir("hooks-report-home");
+        fs::create_dir_all(workspace.join(".claw")).expect("workspace config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+        env::set_var("CLAW_CONFIG_HOME", &home);
+
+        fs::write(
+            home.join("settings.json"),
+            r#"{"hooks":{"PreToolUse":["echo pre"],"PostToolUse":["echo post"]}}"#,
+        )
+        .expect("write home hooks");
+        fs::write(
+            workspace.join(".claw").join("settings.local.json"),
+            r#"{"hooks":{"PostToolUse":["echo local post"]}}"#,
+        )
+        .expect("write local hooks");
+
+        let report = handle_hooks_slash_command(None, &workspace).expect("hooks report");
+        assert!(report.contains("Hooks"));
+        assert!(report.contains("Configured hooks  2"));
+        assert!(report.contains("Runtime support   PreToolUse, PostToolUse shell commands"));
+        assert!(report.contains("PreToolUse"));
+        assert!(report.contains("1. echo pre"));
+        assert!(report.contains("PostToolUse"));
+        assert!(report.contains("1. echo local post"));
+        assert!(report.contains("Loaded config files"));
+
+        env::remove_var("CLAW_CONFIG_HOME");
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]

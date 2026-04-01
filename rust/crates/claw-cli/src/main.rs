@@ -22,9 +22,9 @@ use api::{
 };
 
 use commands::{
-    handle_agents_slash_command, handle_plugins_slash_command, handle_skills_slash_command,
-    render_slash_command_help, resume_supported_slash_commands, slash_command_specs,
-    suggest_slash_commands, SlashCommand,
+    handle_agents_slash_command, handle_hooks_slash_command, handle_plugins_slash_command,
+    handle_skills_slash_command, render_slash_command_help, resume_supported_slash_commands,
+    slash_command_specs, suggest_slash_commands, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
@@ -86,6 +86,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         CliAction::DumpManifests => dump_manifests(),
         CliAction::BootstrapPlan => print_bootstrap_plan(),
         CliAction::Agents { args } => LiveCli::print_agents(args.as_deref())?,
+        CliAction::Hooks { args } => LiveCli::print_hooks(args.as_deref())?,
         CliAction::Skills { args } => LiveCli::print_skills(args.as_deref())?,
         CliAction::PrintSystemPrompt { cwd, date } => print_system_prompt(cwd, date),
         CliAction::Version => print_version(),
@@ -119,6 +120,9 @@ enum CliAction {
     DumpManifests,
     BootstrapPlan,
     Agents {
+        args: Option<String>,
+    },
+    Hooks {
         args: Option<String>,
     },
     Skills {
@@ -290,6 +294,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "agents" => Ok(CliAction::Agents {
             args: join_optional_args(&rest[1..]),
         }),
+        "hooks" => Ok(CliAction::Hooks {
+            args: join_optional_args(&rest[1..]),
+        }),
         "skills" => Ok(CliAction::Skills {
             args: join_optional_args(&rest[1..]),
         }),
@@ -332,6 +339,7 @@ fn parse_direct_slash_cli_action(rest: &[String]) -> Result<CliAction, String> {
     match SlashCommand::parse(&raw) {
         Some(SlashCommand::Help) => Ok(CliAction::Help),
         Some(SlashCommand::Agents { args }) => Ok(CliAction::Agents { args }),
+        Some(SlashCommand::Hooks { args }) => Ok(CliAction::Hooks { args }),
         Some(SlashCommand::Skills { args }) => Ok(CliAction::Skills { args }),
         Some(command) => Err(format_direct_slash_command_error(
             match &command {
@@ -943,6 +951,13 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(render_config_report(section.as_deref())?),
         }),
+        SlashCommand::Hooks { args } => {
+            let cwd = env::current_dir()?;
+            Ok(ResumeCommandOutcome {
+                session: session.clone(),
+                message: Some(handle_hooks_slash_command(args.as_deref(), &cwd)?),
+            })
+        }
         SlashCommand::Memory => Ok(ResumeCommandOutcome {
             session: session.clone(),
             message: Some(render_memory_report()?),
@@ -1295,6 +1310,10 @@ impl LiveCli {
                 Self::print_config(section.as_deref())?;
                 false
             }
+            SlashCommand::Hooks { args } => {
+                Self::print_hooks(args.as_deref())?;
+                false
+            }
             SlashCommand::Memory => {
                 Self::print_memory()?;
                 false
@@ -1553,6 +1572,12 @@ impl LiveCli {
     fn print_agents(args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
         println!("{}", handle_agents_slash_command(args, &cwd)?);
+        Ok(())
+    }
+
+    fn print_hooks(args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        println!("{}", handle_hooks_slash_command(args, &cwd)?);
         Ok(())
     }
 
@@ -4059,6 +4084,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
+        "  claw hooks                            Inspect configured tool hooks"
+    )?;
+    writeln!(
+        out,
         "  claw skills                           List discoverable local skills"
     )?;
     writeln!(out, "  claw system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
@@ -4128,6 +4157,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  claw --resume session.json /status /diff /export notes.txt"
     )?;
     writeln!(out, "  claw agents")?;
+    writeln!(out, "  claw hooks")?;
     writeln!(out, "  claw /skills")?;
     writeln!(out, "  claw login")?;
     writeln!(out, "  claw init")?;
@@ -4356,6 +4386,10 @@ mod tests {
             CliAction::Agents { args: None }
         );
         assert_eq!(
+            parse_args(&["hooks".to_string()]).expect("hooks should parse"),
+            CliAction::Hooks { args: None }
+        );
+        assert_eq!(
             parse_args(&["skills".to_string()]).expect("skills should parse"),
             CliAction::Skills { args: None }
         );
@@ -4373,6 +4407,10 @@ mod tests {
         assert_eq!(
             parse_args(&["/agents".to_string()]).expect("/agents should parse"),
             CliAction::Agents { args: None }
+        );
+        assert_eq!(
+            parse_args(&["/hooks".to_string()]).expect("/hooks should parse"),
+            CliAction::Hooks { args: None }
         );
         assert_eq!(
             parse_args(&["/skills".to_string()]).expect("/skills should parse"),
@@ -4482,6 +4520,7 @@ mod tests {
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <session-path>"));
         assert!(help.contains("/config [env|hooks|model|plugins]"));
+        assert!(help.contains("/hooks"));
         assert!(help.contains("/memory"));
         assert!(help.contains("/init"));
         assert!(help.contains("/diff"));
@@ -4546,8 +4585,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "help", "status", "compact", "clear", "cost", "config", "memory", "init", "diff",
-                "version", "export", "agents", "skills",
+                "help", "status", "compact", "clear", "cost", "config", "hooks", "memory", "init",
+                "diff", "version", "export", "agents", "skills",
             ]
         );
     }
@@ -4618,6 +4657,7 @@ mod tests {
         assert!(help.contains("claw init"));
         assert!(help.contains("Open slash suggestions in the REPL"));
         assert!(help.contains("claw agents"));
+        assert!(help.contains("claw hooks"));
         assert!(help.contains("claw skills"));
         assert!(help.contains("claw /skills"));
     }

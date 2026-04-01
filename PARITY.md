@@ -59,15 +59,18 @@ Evidence:
 ### Rust exists
 Evidence:
 - Hook config is parsed and merged in `rust/crates/runtime/src/config.rs`.
-- Hook config can be inspected via Rust config reporting in `rust/crates/commands/src/lib.rs` and `rust/crates/claw-cli/src/main.rs`.
+- Shell-command `PreToolUse` / `PostToolUse` hooks execute via `rust/crates/runtime/src/hooks.rs`.
+- Conversation runtime runs pre/post hooks around tool execution in `rust/crates/runtime/src/conversation.rs`.
+- Hook config can now be inspected through a dedicated Rust `/hooks` report in `rust/crates/commands/src/lib.rs` and `rust/crates/claw-cli/src/main.rs`.
 - Prompt guidance mentions hooks in `rust/crates/runtime/src/prompt.rs`.
 
 ### Missing or broken in Rust
-- No actual hook execution pipeline in `rust/crates/runtime/src/conversation.rs`.
-- No PreToolUse/PostToolUse mutation/deny/rewrite/result-hook behavior.
-- No Rust `/hooks` parity command.
+- No TS-style matcher-based hook config model; Rust only supports merged string command lists under `settings.hooks.PreToolUse` and `PostToolUse`.
+- No TS-style prompt/agent/http hook types, `PostToolUseFailure`, `PermissionDenied`, or richer hook lifecycle surfaces.
+- No TS-equivalent interactive `/hooks` browser/editor; Rust currently provides inspection/reporting only.
+- No PreToolUse/PostToolUse input rewrite, MCP-output mutation, or continuation-stop behavior beyond allow/deny plus feedback text.
 
-**Status:** config-only; runtime behavior missing.
+**Status:** basic shell hook runtime plus `/hooks` inspection; richer TS hook model still missing.
 
 ---
 
